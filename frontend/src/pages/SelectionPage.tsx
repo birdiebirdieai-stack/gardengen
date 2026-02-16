@@ -7,11 +7,16 @@ import SurfaceGauge from '../components/SurfaceGauge';
 
 export default function SelectionPage() {
   const navigate = useNavigate();
-  const {
-    width, height, vegetables, setVegetables,
-    selectedItems, setQuantity,
-    setResult, setLoading, setError, loading,
-  } = useGardenStore();
+  const width = useGardenStore((state) => state.width);
+  const height = useGardenStore((state) => state.height);
+  const vegetables = useGardenStore((state) => state.vegetables);
+  const setVegetables = useGardenStore((state) => state.setVegetables);
+  const selectedItems = useGardenStore((state) => state.selectedItems);
+  const setQuantity = useGardenStore((state) => state.setQuantity);
+  const setResult = useGardenStore((state) => state.setResult);
+  const setLoading = useGardenStore((state) => state.setLoading);
+  const setError = useGardenStore((state) => state.setError);
+  const loading = useGardenStore((state) => state.loading);
 
   useEffect(() => {
     api.getVegetables().then(setVegetables);
