@@ -66,7 +66,7 @@ def generate_plan(req: GenerateRequest, db: Session) -> GenerateResponse:
         rows = _optimize_row_order(rows, assoc_scores)
 
     # Fill gaps in rows with vegetables from other rows
-    _fill_gaps(rows, W, assoc_scores)
+    _fill_gaps(rows, W, assoc_scores, H)
 
     # Remove empty rows (in case all items were moved)
     rows = [r for r in rows if r["plants"]]
@@ -169,19 +169,45 @@ def _fill_gaps(
     rows: list[dict],
     W: int,
     assoc_scores: dict[tuple[int, int], int],
+    H: int,
 ) -> None:
-    """Try to fill gaps at the end of rows with vegetables from other rows,
-    prioritizing non-negative associations and fitting dimensions."""
-    # Iterate through rows top to bottom
+    """Two-phase gap filling:
+    1. Merge same types (e.g. carrots with carrots).
+    2. Rescue "overflow" plants from the bottom that would otherwise be rejected.
+    """
+    # Helper to calculate where rows physically sit
+    def get_row_positions():
+        positions = []
+        cy = 0
+        for r in rows:
+            positions.append(cy)
+            cy += r["row_h"]
+        return positions
+
+    # Phase 1: Consolidate same types
+    _fill_gaps_pass(rows, W, assoc_scores, mode="same_type")
+
+    # Phase 2: Rescue overflow (only items that would fall off the map)
+    # We need to know which rows are "overflowing" based on current height
+    # BUT, since moving items changes heights (if rows empty), this is dynamic.
+    # However, for simplicity, we treat "bottom of the list" as the rescue source.
+    # We'll rely on the mode="rescue_overflow" logic.
+    _fill_gaps_pass(rows, W, assoc_scores, mode="rescue_overflow", H=H)
+
+
+def _fill_gaps_pass(
+    rows: list[dict],
+    W: int,
+    assoc_scores: dict[tuple[int, int], int],
+    mode: str,  # "same_type" or "rescue_overflow"
+    H: int = 0
+) -> None:
     for i in range(len(rows)):
         target_row = rows[i]
-
-        # Skip if target row is empty (it will be removed, preserving vertical space)
         if not target_row["plants"]:
             continue
 
         while True:
-            # Calculate current gap
             used_width = 0
             if target_row["plants"]:
                 last_plant = target_row["plants"][-1]
@@ -193,78 +219,92 @@ def _fill_gaps(
 
             candidate_found = False
 
-            # Search for candidates from bottom rows upwards
-            # Start from the last row, go up to i+1
+            # Recalculate row positions to know what is overflowing
+            current_positions = []
+            cy = 0
+            for r in rows:
+                current_positions.append(cy)
+                cy += r["row_h"]
+
+            # Scan from bottom up
             for j in range(len(rows) - 1, i, -1):
                 source_row = rows[j]
                 if not source_row["plants"]:
                     continue
 
-                # Check each plant in the source row
-                # We iterate backwards to take from the end
+                # Mode checks
+                if mode == "same_type":
+                    if source_row["veg_id"] != target_row["veg_id"]:
+                        continue
+                elif mode == "rescue_overflow":
+                    # Only take if source row is currently off-screen or partially off-screen
+                    # Or if the row itself is fine but sits BELOW the cutoff?
+                    # Actually, if row_y >= H, it starts OFF screen.
+                    # If row_y + row_h > H, it ends OFF screen.
+                    # We want to rescue anything that is at risk.
+                    row_y = current_positions[j]
+                    if row_y + source_row["row_h"] <= H:
+                         continue # fits comfortably completely inside H, leave it alone
+
+                # Iterate plants in source row
                 for k in range(len(source_row["plants"]) - 1, -1, -1):
                     plant = source_row["plants"][k]
 
-                    # 1. Check dimensions
+                    # 1. Dimensions
                     if plant["w"] > gap:
                         continue
                     if plant["h"] > target_row["row_h"]:
                         continue
 
-                    # 2. Check associations
-                    # Horizontal: Check all neighbors within interaction distance (gap <= 1)
+                    # 2. Associations (Skip for same_type as they are naturally compatible with themselves usually,
+                    # but technically we should still check if there's a mix in target row.
+                    # If target row is pure same type, self-association is usually 0 or good.)
+                    # Note: We must check associations if target_row has OTHER plants.
+
+                    # Horizontal Check
                     valid_horizontal = True
                     for placed_p in reversed(target_row["plants"]):
                         dist = used_width - (placed_p["x_offset"] + placed_p["w"])
                         if dist > 1:
-                            break  # Too far, no more interactions
-
+                            break
                         score = assoc_scores.get((placed_p["veg_id"], plant["veg_id"]), 0)
                         if score < 0:
                             valid_horizontal = False
                             break
-
                     if not valid_horizontal:
                         continue
 
-                    # Vertical: Neighbor below (next row primary veg)
+                    # Vertical Checks (Below)
                     next_row_id = None
                     for r_idx in range(i + 1, len(rows)):
                         if rows[r_idx]["plants"]:
                             next_row_id = rows[r_idx]["veg_id"]
                             break
-
                     if next_row_id is not None:
                         score = assoc_scores.get((plant["veg_id"], next_row_id), 0)
                         if score < 0:
                             continue
 
-                    # Vertical: Neighbor above (prev row primary veg)
+                    # Vertical Checks (Above)
                     prev_row_id = None
                     for r_idx in range(i - 1, -1, -1):
                         if rows[r_idx]["plants"]:
                             prev_row_id = rows[r_idx]["veg_id"]
                             break
-
                     if prev_row_id is not None:
                         score = assoc_scores.get((prev_row_id, plant["veg_id"]), 0)
                         if score < 0:
                             continue
 
-                    # Found a candidate! Move it.
+                    # Move it
                     moved_plant = source_row["plants"].pop(k)
-
-                    # Update its position
                     moved_plant["x_offset"] = used_width
-
-                    # Add to target
                     target_row["plants"].append(moved_plant)
-
                     candidate_found = True
-                    break  # Break inner loop (plants)
+                    break
 
                 if candidate_found:
-                    break  # Break outer loop (source rows) to recalculate gap
+                    break
 
             if not candidate_found:
-                break  # No more candidates fit in this gap
+                break
