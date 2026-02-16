@@ -48,7 +48,12 @@ def generate_plan(req: GenerateRequest, db: Session) -> GenerateResponse:
             n = min(remaining, per_row)
             plants = []
             for i in range(n):
-                plants.append({"x_offset": i * pw, "w": pw, "h": ph})
+                plants.append({
+                    "veg_id": item.vegetable_id,
+                    "x_offset": i * pw,
+                    "w": pw,
+                    "h": ph
+                })
             rows.append({
                 "veg_id": item.vegetable_id,
                 "row_h": ph,
@@ -60,6 +65,12 @@ def generate_plan(req: GenerateRequest, db: Session) -> GenerateResponse:
     if len(rows) > 1:
         rows = _optimize_row_order(rows, assoc_scores)
 
+    # Fill gaps in rows with vegetables from other rows
+    _fill_gaps(rows, W, assoc_scores)
+
+    # Remove empty rows (in case all items were moved)
+    rows = [r for r in rows if r["plants"]]
+
     # Place rows top to bottom
     placed: list[PlacedVegetable] = []
     cursor_y = 0
@@ -69,7 +80,7 @@ def generate_plan(req: GenerateRequest, db: Session) -> GenerateResponse:
             continue
         for p in row["plants"]:
             placed.append(PlacedVegetable(
-                vegetable_id=row["veg_id"],
+                vegetable_id=p["veg_id"],
                 x=p["x_offset"],
                 y=cursor_y,
                 w=p["w"],
@@ -152,3 +163,108 @@ def _are_adjacent(a: PlacedVegetable, b: PlacedVegetable) -> bool:
     gap_x = max(0, max(a.x, b.x) - min(a.x + a.w, b.x + b.w))
     gap_y = max(0, max(a.y, b.y) - min(a.y + a.h, b.y + b.h))
     return gap_x <= 1 and gap_y <= 1
+
+
+def _fill_gaps(
+    rows: list[dict],
+    W: int,
+    assoc_scores: dict[tuple[int, int], int],
+) -> None:
+    """Try to fill gaps at the end of rows with vegetables from other rows,
+    prioritizing non-negative associations and fitting dimensions."""
+    # Iterate through rows top to bottom
+    for i in range(len(rows)):
+        target_row = rows[i]
+
+        # Skip if target row is empty (it will be removed, preserving vertical space)
+        if not target_row["plants"]:
+            continue
+
+        while True:
+            # Calculate current gap
+            used_width = 0
+            if target_row["plants"]:
+                last_plant = target_row["plants"][-1]
+                used_width = last_plant["x_offset"] + last_plant["w"]
+
+            gap = W - used_width
+            if gap <= 0:
+                break
+
+            candidate_found = False
+
+            # Search for candidates from bottom rows upwards
+            # Start from the last row, go up to i+1
+            for j in range(len(rows) - 1, i, -1):
+                source_row = rows[j]
+                if not source_row["plants"]:
+                    continue
+
+                # Check each plant in the source row
+                # We iterate backwards to take from the end
+                for k in range(len(source_row["plants"]) - 1, -1, -1):
+                    plant = source_row["plants"][k]
+
+                    # 1. Check dimensions
+                    if plant["w"] > gap:
+                        continue
+                    if plant["h"] > target_row["row_h"]:
+                        continue
+
+                    # 2. Check associations
+                    # Horizontal: Check all neighbors within interaction distance (gap <= 1)
+                    valid_horizontal = True
+                    for placed_p in reversed(target_row["plants"]):
+                        dist = used_width - (placed_p["x_offset"] + placed_p["w"])
+                        if dist > 1:
+                            break  # Too far, no more interactions
+
+                        score = assoc_scores.get((placed_p["veg_id"], plant["veg_id"]), 0)
+                        if score < 0:
+                            valid_horizontal = False
+                            break
+
+                    if not valid_horizontal:
+                        continue
+
+                    # Vertical: Neighbor below (next row primary veg)
+                    next_row_id = None
+                    for r_idx in range(i + 1, len(rows)):
+                        if rows[r_idx]["plants"]:
+                            next_row_id = rows[r_idx]["veg_id"]
+                            break
+
+                    if next_row_id is not None:
+                        score = assoc_scores.get((plant["veg_id"], next_row_id), 0)
+                        if score < 0:
+                            continue
+
+                    # Vertical: Neighbor above (prev row primary veg)
+                    prev_row_id = None
+                    for r_idx in range(i - 1, -1, -1):
+                        if rows[r_idx]["plants"]:
+                            prev_row_id = rows[r_idx]["veg_id"]
+                            break
+
+                    if prev_row_id is not None:
+                        score = assoc_scores.get((prev_row_id, plant["veg_id"]), 0)
+                        if score < 0:
+                            continue
+
+                    # Found a candidate! Move it.
+                    moved_plant = source_row["plants"].pop(k)
+
+                    # Update its position
+                    moved_plant["x_offset"] = used_width
+
+                    # Add to target
+                    target_row["plants"].append(moved_plant)
+
+                    candidate_found = True
+                    break  # Break inner loop (plants)
+
+                if candidate_found:
+                    break  # Break outer loop (source rows) to recalculate gap
+
+            if not candidate_found:
+                break  # No more candidates fit in this gap
