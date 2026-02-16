@@ -8,7 +8,10 @@ import RejectedPanel from '../components/RejectedPanel';
 
 export default function GardenViewPage() {
   const navigate = useNavigate();
-  const { width, height, result, vegetables } = useGardenStore();
+  const width = useGardenStore((state) => state.width);
+  const height = useGardenStore((state) => state.height);
+  const result = useGardenStore((state) => state.result);
+  const vegetables = useGardenStore((state) => state.vegetables);
   const [associations, setAssociations] = useState<Association[]>([]);
 
   useEffect(() => {

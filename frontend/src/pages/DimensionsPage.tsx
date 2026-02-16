@@ -3,7 +3,9 @@ import { useNavigate } from 'react-router-dom';
 import { useGardenStore } from '../store/gardenStore';
 
 export default function DimensionsPage() {
-  const { width, height, setDimensions } = useGardenStore();
+  const width = useGardenStore((state) => state.width);
+  const height = useGardenStore((state) => state.height);
+  const setDimensions = useGardenStore((state) => state.setDimensions);
   const [w, setW] = useState(width);
   const [h, setH] = useState(height);
   const navigate = useNavigate();
