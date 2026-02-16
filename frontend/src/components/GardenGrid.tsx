@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import type { GenerateResponse, Vegetable, Association } from '../api/types';
 import PlacedVegetableComp from './PlacedVegetable';
 
@@ -13,8 +13,26 @@ interface Props {
 export default function GardenGrid({ result, vegetables, associations, gridW, gridH }: Props) {
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
   const [zoom, setZoom] = useState(1);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState(0);
 
-  const cellSize = 6 * zoom; // pixels per 5cm cell
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        setContainerWidth(entry.contentRect.width);
+      }
+    });
+    observer.observe(containerRef.current);
+    return () => observer.disconnect();
+  }, []);
+
+  // Dynamic cell size calculation based on container width
+  // Fallback to 20 if containerWidth is 0 (initial render)
+  // Ensure we don't divide by zero if gridW is somehow 0
+  const baseSize = (containerWidth > 0 && gridW > 0) ? containerWidth / gridW : 20;
+  const cellSize = baseSize * zoom;
+
   const totalW = gridW * cellSize;
   const totalH = gridH * cellSize;
 
@@ -68,7 +86,11 @@ export default function GardenGrid({ result, vegetables, associations, gridW, gr
       </div>
 
       <div className="flex gap-4">
-        <div className="overflow-auto border border-gray-300 rounded-lg bg-white flex-1" style={{ maxHeight: '70vh' }}>
+        <div
+          ref={containerRef}
+          className="overflow-auto border border-gray-300 rounded-lg bg-white flex-1"
+          style={{ maxHeight: '70vh' }}
+        >
           <div
             className="relative"
             style={{ width: totalW, height: totalH }}
