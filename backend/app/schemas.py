@@ -1,14 +1,14 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # ---------- Vegetable ----------
 class VegetableBase(BaseModel):
-    name: str
-    variety: str = ""
-    slug: str
-    grid_width: int
-    grid_height: int
-    color: str = "#22c55e"
+    name: str = Field(..., max_length=100)
+    variety: str = Field("", max_length=100)
+    slug: str = Field(..., max_length=100)
+    grid_width: int = Field(..., ge=1, le=500)
+    grid_height: int = Field(..., ge=1, le=500)
+    color: str = Field("#22c55e", max_length=7)
 
 
 class VegetableCreate(VegetableBase):
@@ -16,12 +16,12 @@ class VegetableCreate(VegetableBase):
 
 
 class VegetableUpdate(BaseModel):
-    name: str | None = None
-    variety: str | None = None
-    slug: str | None = None
-    grid_width: int | None = None
-    grid_height: int | None = None
-    color: str | None = None
+    name: str | None = Field(None, max_length=100)
+    variety: str | None = Field(None, max_length=100)
+    slug: str | None = Field(None, max_length=100)
+    grid_width: int | None = Field(None, ge=1, le=500)
+    grid_height: int | None = Field(None, ge=1, le=500)
+    color: str | None = Field(None, max_length=7)
 
 
 class VegetableOut(VegetableBase):
@@ -53,13 +53,13 @@ class AssociationWithNames(AssociationOut):
 # ---------- Generate ----------
 class GenerateItem(BaseModel):
     vegetable_id: int
-    quantity: int
+    quantity: int = Field(..., ge=1, le=100)
 
 
 class GenerateRequest(BaseModel):
-    width_cm: int
-    height_cm: int
-    items: list[GenerateItem]
+    width_cm: int = Field(..., ge=10, le=2000)
+    height_cm: int = Field(..., ge=10, le=2000)
+    items: list[GenerateItem] = Field(..., max_length=50)
 
 
 class PlacedVegetable(BaseModel):
