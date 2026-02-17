@@ -1,6 +1,6 @@
-"""Garden placement algorithm — row-based layout with companion planting."""
+"""Garden placement algorithm — 2D block-based layout with companion planting."""
 
-from itertools import permutations
+import math
 from sqlalchemy.orm import Session
 
 from .models import Association, Vegetable
@@ -27,147 +27,259 @@ def generate_plan(req: GenerateRequest, db: Session) -> GenerateResponse:
     ).all():
         assoc_scores[(a.vegetable_id_main, a.vegetable_id_target)] = a.score
 
-    # Build rows: one row per vegetable type, each row = full width of garden
-    # Row height = plant height, items placed side by side along the row
-    rows: list[dict] = []  # {veg_id, row_h, plants: [{x, y_offset, w, h}]}
-    rejected: list[int] = []
-
+    # Build vegetable blocks: each vegetable type = one rectangular block
+    blocks: list[dict] = []
     for item in req.items:
         v = veg_map.get(item.vegetable_id)
         if not v:
             continue
         pw, ph = v.grid_width, v.grid_height
-        # How many fit per row of width W?
-        per_row = W // pw if pw > 0 else 0
+        if pw > W or ph > H:
+            continue
+        qty = item.quantity
+        per_row = W // pw
         if per_row == 0:
-            rejected.extend([item.vegetable_id] * item.quantity)
             continue
 
-        remaining = item.quantity
-        while remaining > 0:
-            n = min(remaining, per_row)
-            plants = []
-            for i in range(n):
-                plants.append({
-                    "veg_id": item.vegetable_id,
-                    "x_offset": i * pw,
-                    "w": pw,
-                    "h": ph
-                })
-            rows.append({
-                "veg_id": item.vegetable_id,
-                "row_h": ph,
-                "plants": plants,
-            })
-            remaining -= n
+        # Calculate block dimensions
+        rows_needed = math.ceil(qty / per_row)
+        last_row_count = qty - (rows_needed - 1) * per_row
+        block_w = min(qty, per_row) * pw
+        block_h = rows_needed * ph
 
-    # Optimize row order using greedy nearest-neighbor on association scores.
-    # We group rows by vegetable ID first to keep same vegetables together.
-    if len(rows) > 1:
-        # Group rows by vegetable type
-        groups = {}
-        for r in rows:
-            groups.setdefault(r["veg_id"], []).append(r)
+        blocks.append({
+            "veg_id": item.vegetable_id,
+            "qty": qty,
+            "pw": pw, "ph": ph,
+            "per_row": per_row,
+            "block_w": block_w,
+            "block_h": block_h,
+            "area": block_w * block_h,
+        })
 
-        # Create representative rows for optimization (use the first row of each group)
-        # We wrap them to preserve the group reference
-        meta_rows = []
-        for vid, grouped_rows in groups.items():
-            rep = grouped_rows[0].copy()
-            rep["_original_group"] = grouped_rows
-            meta_rows.append(rep)
+    # Order blocks: largest first, then chain by best association score.
+    # This ensures friendly vegetables are placed next to each other.
+    blocks = _order_blocks_by_association(blocks, assoc_scores)
 
-        # Optimize order of groups
-        optimized_meta = _optimize_row_order(meta_rows, assoc_scores)
+    # 2D occupancy grid: grid[y][x] = veg_id or 0 (free)
+    grid: list[list[int]] = [[0] * W for _ in range(H)]
 
-        # Flatten back to rows
-        rows = []
-        for meta in optimized_meta:
-            rows.extend(meta["_original_group"])
-
-    # Calculate total height of the layout
-    total_height = sum(r["row_h"] for r in rows)
-
-    if total_height > H:
-        # Step 1: Consolidate same-vegetable rows (merge partial rows together)
-        # This keeps vegetables grouped while reclaiming space.
-        _consolidate_same_vegetable_rows(rows, W)
-        rows = [r for r in rows if r["plants"]]
-        total_height = sum(r["row_h"] for r in rows)
-
-        # Step 2: Only disperse into other vegetable rows if still overflowing
-        if total_height > H:
-            _fill_gaps(rows, W, assoc_scores)
-
-    # Remove empty rows (in case all items were moved)
-    rows = [r for r in rows if r["plants"]]
-
-    # Place rows top to bottom
     placed: list[PlacedVegetable] = []
-    cursor_y = 0
-    for row in rows:
-        if cursor_y + row["row_h"] > H:
-            rejected.extend([row["veg_id"]] * len(row["plants"]))
+    rejected: list[int] = []
+
+    for block in blocks:
+        veg_id = block["veg_id"]
+        pw, ph = block["pw"], block["ph"]
+        qty = block["qty"]
+        max_per_row = block["per_row"]
+
+        # Try different block arrangements (varying columns per row)
+        # from widest to narrowest
+        placed_block = False
+        for cols in range(min(qty, max_per_row), 0, -1):
+            rows_needed = math.ceil(qty / cols)
+            bw = cols * pw
+            bh = rows_needed * ph
+
+            pos = _find_block_position(grid, W, H, veg_id, bw, bh, assoc_scores)
+            if pos is not None:
+                bx, by = pos
+                _place_block(grid, placed, bx, by, veg_id, pw, ph, cols, qty)
+                placed_block = True
+                break
+
+        if placed_block:
             continue
-        for p in row["plants"]:
-            placed.append(PlacedVegetable(
-                vegetable_id=p["veg_id"],
-                x=p["x_offset"],
-                y=cursor_y,
-                w=p["w"],
-                h=p["h"],
-            ))
-        cursor_y += row["row_h"]
 
-    # Compute global score between adjacent rows
+        # No full block arrangement fits — try placing sub-groups
+        remaining = qty
+        while remaining > 0:
+            placed_any = False
+
+            # Try sub-groups from largest to smallest, with varying columns
+            for sub_qty in range(remaining, 0, -1):
+                found = False
+                for cols in range(min(sub_qty, max_per_row), 0, -1):
+                    sub_rows = math.ceil(sub_qty / cols)
+                    sub_w = cols * pw
+                    sub_h = sub_rows * ph
+
+                    pos = _find_block_position(
+                        grid, W, H, veg_id, sub_w, sub_h, assoc_scores
+                    )
+                    if pos is not None:
+                        bx, by = pos
+                        actual_placed = _place_block(
+                            grid, placed, bx, by, veg_id, pw, ph, cols, sub_qty
+                        )
+                        remaining -= actual_placed
+                        placed_any = True
+                        found = True
+                        break
+                if found:
+                    break
+
+            if not placed_any:
+                rejected.extend([veg_id] * remaining)
+                break
+
     global_score = _compute_global_score(placed, assoc_scores)
-
     return GenerateResponse(placed=placed, rejected=rejected, global_score=global_score)
 
 
-def _optimize_row_order(
-    rows: list[dict],
+def _order_blocks_by_association(
+    blocks: list[dict],
     assoc_scores: dict[tuple[int, int], int],
 ) -> list[dict]:
-    """Greedy nearest-neighbor: pick the next row that has the best
-    association score with the current row. For small counts (<= 8),
-    try all permutations."""
-    n = len(rows)
+    """Order blocks so that friendly vegetables are placed consecutively.
 
-    def pair_score(a: dict, b: dict) -> int:
-        return assoc_scores.get((a["veg_id"], b["veg_id"]), 0)
+    Start with the largest block, then greedily pick the next block with the
+    best association score to the last placed one. This ensures friends end
+    up as neighbors on the grid (since placement is top-left greedy).
+    Enemies are naturally pushed apart in the sequence."""
+    if len(blocks) <= 1:
+        return blocks
 
-    def total_score(order: list[int]) -> int:
-        return sum(pair_score(rows[order[i]], rows[order[i + 1]]) for i in range(len(order) - 1))
-
-    if n <= 8:
-        # Brute force best permutation
-        best_order = list(range(n))
-        best = total_score(best_order)
-        for perm in permutations(range(n)):
-            s = total_score(list(perm))
-            if s > best:
-                best = s
-                best_order = list(perm)
-        return [rows[i] for i in best_order]
-
-    # Greedy for larger sets
-    remaining = set(range(n))
-    # Start with the row that has the most associations
-    current = max(remaining, key=lambda i: sum(
-        abs(assoc_scores.get((rows[i]["veg_id"], rows[j]["veg_id"]), 0))
-        for j in remaining if j != i
-    ))
-    order = [current]
-    remaining.remove(current)
+    # Start with the largest block
+    remaining = list(blocks)
+    remaining.sort(key=lambda b: -b["area"])
+    ordered = [remaining.pop(0)]
 
     while remaining:
-        best_next = max(remaining, key=lambda j: pair_score(rows[current], rows[j]))
-        order.append(best_next)
-        remaining.remove(best_next)
-        current = best_next
+        last_vid = ordered[-1]["veg_id"]
+        # Pick the block with the best association to the last placed
+        # Break ties by area descending (place big blocks first)
+        best_idx = 0
+        best_key = None
+        for i, b in enumerate(remaining):
+            score = assoc_scores.get((last_vid, b["veg_id"]), 0)
+            key = (score, b["area"])
+            if best_key is None or key > best_key:
+                best_key = key
+                best_idx = i
+        ordered.append(remaining.pop(best_idx))
 
-    return [rows[i] for i in order]
+    return ordered
+
+
+def _find_block_position(
+    grid: list[list[int]],
+    W: int, H: int,
+    veg_id: int,
+    block_w: int, block_h: int,
+    assoc_scores: dict[tuple[int, int], int],
+) -> tuple[int, int] | None:
+    """Find the best position for a rectangular block on the grid.
+
+    Strategy:
+    1. Must not overlap existing plants
+    2. Strongly prefer no enemies, but accept them as last resort
+    3. Prefer positions adjacent to same vegetable (grouping)
+    4. Prefer positions with good association scores
+    5. Prefer top-left for compact layout
+    """
+    best_pos = None
+    best_score = None
+
+    for y in range(H - block_h + 1):
+        for x in range(W - block_w + 1):
+            if not _area_free(grid, x, y, block_w, block_h):
+                continue
+
+            neighbor_score, has_enemy, has_same = _evaluate_neighbors(
+                grid, W, H, x, y, block_w, block_h, veg_id, assoc_scores
+            )
+
+            # Score: no_enemy > has_enemy, then grouping, then assoc, then top-left
+            score = (not has_enemy, has_same, neighbor_score, -y, -x)
+
+            if best_score is None or score > best_score:
+                best_score = score
+                best_pos = (x, y)
+
+    return best_pos
+
+
+def _place_block(
+    grid: list[list[int]],
+    placed: list[PlacedVegetable],
+    bx: int, by: int,
+    veg_id: int, pw: int, ph: int,
+    per_row: int, qty: int,
+) -> int:
+    """Place plants in a rectangular block starting at (bx, by).
+    Returns the number of plants actually placed."""
+    count = 0
+    row = 0
+    col = 0
+    for _ in range(qty):
+        x = bx + col * pw
+        y = by + row * ph
+
+        # Mark grid
+        for dy in range(ph):
+            for dx in range(pw):
+                grid[y + dy][x + dx] = veg_id
+
+        placed.append(PlacedVegetable(
+            vegetable_id=veg_id, x=x, y=y, w=pw, h=ph
+        ))
+        count += 1
+        col += 1
+        if col >= per_row:
+            col = 0
+            row += 1
+
+    return count
+
+
+def _area_free(grid: list[list[int]], x: int, y: int, w: int, h: int) -> bool:
+    """Check if a rectangular area is entirely free on the grid."""
+    for dy in range(h):
+        row = grid[y + dy]
+        for dx in range(w):
+            if row[x + dx] != 0:
+                return False
+    return True
+
+
+def _evaluate_neighbors(
+    grid: list[list[int]],
+    W: int, H: int,
+    x: int, y: int, bw: int, bh: int,
+    veg_id: int,
+    assoc_scores: dict[tuple[int, int], int],
+) -> tuple[int, bool, bool]:
+    """Evaluate the neighborhood around a block position.
+
+    Returns: (total_score, has_enemy, has_same_vegetable)
+    Checks cells immediately adjacent to the block border.
+    """
+    total_score = 0
+    has_enemy = False
+    has_same = False
+    checked_veg_ids: set[int] = set()
+
+    # Scan the 1-cell border around the block
+    for dy in range(-1, bh + 1):
+        for dx in range(-1, bw + 1):
+            # Skip interior
+            if 0 <= dy < bh and 0 <= dx < bw:
+                continue
+            ny, nx = y + dy, x + dx
+            if 0 <= ny < H and 0 <= nx < W:
+                neighbor_id = grid[ny][nx]
+                if neighbor_id != 0:
+                    if neighbor_id == veg_id:
+                        has_same = True
+                    if neighbor_id not in checked_veg_ids:
+                        checked_veg_ids.add(neighbor_id)
+                        score = assoc_scores.get((veg_id, neighbor_id), 0)
+                        total_score += score
+                        if score < 0:
+                            has_enemy = True
+
+    return total_score, has_enemy, has_same
 
 
 def _compute_global_score(
@@ -194,196 +306,3 @@ def _are_adjacent(a: PlacedVegetable, b: PlacedVegetable) -> bool:
     gap_x = max(0, max(a.x, b.x) - min(a.x + a.w, b.x + b.w))
     gap_y = max(0, max(a.y, b.y) - min(a.y + a.h, b.y + b.h))
     return gap_x <= 1 and gap_y <= 1
-
-
-def _consolidate_same_vegetable_rows(rows: list[dict], W: int) -> None:
-    """Merge partial rows of the same vegetable into fewer rows.
-    E.g. if radishes have 2 rows (one with 5, one with 3) and 8 fit per row,
-    merge them into a single row of 8 — freeing an entire row of vertical space."""
-    # Group row indices by veg_id
-    veg_groups: dict[int, list[int]] = {}
-    for idx, row in enumerate(rows):
-        if row["plants"]:
-            veg_groups.setdefault(row["veg_id"], []).append(idx)
-
-    for veg_id, indices in veg_groups.items():
-        if len(indices) <= 1:
-            continue
-
-        # Collect all plants from these rows
-        all_plants = []
-        row_h = rows[indices[0]]["row_h"]
-        for idx in indices:
-            all_plants.extend(rows[idx]["plants"])
-            rows[idx]["plants"] = []
-
-        # How many fit per row?
-        if not all_plants:
-            continue
-        pw = all_plants[0]["w"]
-        per_row = W // pw if pw > 0 else 0
-        if per_row == 0:
-            continue
-
-        # Redistribute plants into as few rows as possible
-        target_idx = 0
-        for i, plant in enumerate(all_plants):
-            if target_idx < len(indices):
-                row_index = indices[target_idx]
-            else:
-                break
-            plant["x_offset"] = (i % per_row) * pw
-            rows[row_index]["plants"].append(plant)
-            rows[row_index]["row_h"] = row_h
-            rows[row_index]["veg_id"] = veg_id
-            if (i + 1) % per_row == 0:
-                target_idx += 1
-
-
-def _fill_gaps(
-    rows: list[dict],
-    W: int,
-    assoc_scores: dict[tuple[int, int], int],
-) -> None:
-    """Try to fill gaps at the end of rows with vegetables from other rows,
-    prioritizing non-negative associations and fitting dimensions.
-    Iterates through all possible source rows to maximize compaction."""
-    # Iterate through rows top to bottom
-    for i in range(len(rows)):
-        target_row = rows[i]
-
-        # Skip if target row is empty (it will be removed, preserving vertical space)
-        if not target_row["plants"]:
-            continue
-
-        while True:
-            # Calculate current gap
-            used_width = 0
-            if target_row["plants"]:
-                last_plant = target_row["plants"][-1]
-                used_width = last_plant["x_offset"] + last_plant["w"]
-
-            gap = W - used_width
-            if gap <= 0:
-                break
-
-            # Identify potential source rows
-            potential_sources = []
-            for j in range(len(rows)):
-                if i == j:
-                    continue
-                if not rows[j]["plants"]:
-                    continue
-
-                # Check if the row has a representative plant that fits
-                candidate_plant = rows[j]["plants"][-1]
-                if candidate_plant["w"] <= gap and candidate_plant["h"] <= target_row["row_h"]:
-                    potential_sources.append(j)
-
-            # Sort sources:
-            # 1. Height Ascending (Prioritize emptying small rows to save vertical space)
-            # 2. Index Descending (Prioritize bottom rows to avoid rejection)
-            potential_sources.sort(key=lambda idx: (rows[idx]["row_h"], -idx))
-
-            candidate_found = False
-
-            for j in potential_sources:
-                source_row = rows[j]
-
-                # We try to take the last plant
-                for k in range(len(source_row["plants"]) - 1, -1, -1):
-                    plant = source_row["plants"][k]
-
-                    # 1. Check dimensions
-                    if plant["w"] > gap:
-                        continue
-                    if plant["h"] > target_row["row_h"]:
-                        continue
-
-                    # Avoid moving a plant back to its "home" row type from a "host" row,
-                    # as this usually increases vertical space usage (un-hiding the plant).
-                    # We allow merging two rows of same type (Home -> Home).
-                    if plant["veg_id"] == target_row["veg_id"] and plant["veg_id"] != source_row["veg_id"]:
-                        continue
-
-                    # 2. Check associations
-                    # Horizontal: Check all neighbors within interaction distance (gap <= 1)
-                    valid_horizontal = True
-                    for placed_p in reversed(target_row["plants"]):
-                        dist = used_width - (placed_p["x_offset"] + placed_p["w"])
-                        if dist > 1:
-                            break  # Too far, no more interactions
-
-                        score = assoc_scores.get((placed_p["veg_id"], plant["veg_id"]), 0)
-                        if score < 0:
-                            valid_horizontal = False
-                            break
-
-                    if not valid_horizontal:
-                        continue
-
-                    # Vertical: Neighbor below
-                    vertical_conflict = False
-                    for r_idx in range(i + 1, len(rows)):
-                        neighbor_row = rows[r_idx]
-                        if not neighbor_row["plants"]:
-                            continue
-
-                        # Check all plants in that row for overlap and conflict
-                        for neighbor_p in neighbor_row["plants"]:
-                            p_x, p_w = neighbor_p["x_offset"], neighbor_p["w"]
-                            cand_x, cand_w = used_width, plant["w"]
-
-                            gap_x = max(0, max(p_x, cand_x) - min(p_x + p_w, cand_x + cand_w))
-                            if gap_x <= 1:
-                                score = assoc_scores.get((plant["veg_id"], neighbor_p["veg_id"]), 0)
-                                if score < 0:
-                                    vertical_conflict = True
-                                    break
-                        # Only check the immediate next non-empty row
-                        break
-
-                    if vertical_conflict:
-                        continue
-
-                    # Vertical: Neighbor above
-                    vertical_conflict = False
-                    for r_idx in range(i - 1, -1, -1):
-                        neighbor_row = rows[r_idx]
-                        if not neighbor_row["plants"]:
-                            continue
-
-                        # Check all plants in that row for overlap and conflict
-                        for neighbor_p in neighbor_row["plants"]:
-                            p_x, p_w = neighbor_p["x_offset"], neighbor_p["w"]
-                            cand_x, cand_w = used_width, plant["w"]
-
-                            gap_x = max(0, max(p_x, cand_x) - min(p_x + p_w, cand_x + cand_w))
-                            if gap_x <= 1:
-                                score = assoc_scores.get((plant["veg_id"], neighbor_p["veg_id"]), 0)
-                                if score < 0:
-                                    vertical_conflict = True
-                                    break
-                        # Only check the immediate prev non-empty row
-                        break
-
-                    if vertical_conflict:
-                        continue
-
-                    # Found a candidate! Move it.
-                    moved_plant = source_row["plants"].pop(k)
-
-                    # Update its position
-                    moved_plant["x_offset"] = used_width
-
-                    # Add to target
-                    target_row["plants"].append(moved_plant)
-
-                    candidate_found = True
-                    break  # Break inner loop (plants)
-
-                if candidate_found:
-                    break  # Break outer loop (source rows) to recalculate gap
-
-            if not candidate_found:
-                break  # No more candidates fit in this gap
