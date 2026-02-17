@@ -200,32 +200,40 @@ def _fill_gaps(
                 if not source_row["plants"]:
                     continue
 
-                # Check each plant in the source row
-                # We iterate backwards to take from the end
-                for k in range(len(source_row["plants"]) - 1, -1, -1):
-                    plant = source_row["plants"][k]
+                # Check if the ENTIRE remaining source row fits
+                # Prioritize keeping rows intact to avoid fragmentation
+                source_plants = source_row["plants"]
+                if not source_plants:
+                    continue
 
-                    # 1. Check dimensions
-                    if plant["w"] > gap:
-                        continue
-                    if plant["h"] > target_row["row_h"]:
-                        continue
+                first_plant = source_plants[0]
+                total_width = len(source_plants) * first_plant["w"]
 
-                    # 2. Check associations
-                    # Horizontal: Check all neighbors within interaction distance (gap <= 1)
-                    valid_horizontal = True
-                    for placed_p in reversed(target_row["plants"]):
-                        dist = used_width - (placed_p["x_offset"] + placed_p["w"])
-                        if dist > 1:
-                            break  # Too far, no more interactions
+                # 1. Check dimensions
+                if total_width > gap:
+                    continue  # Only move if the whole row fits (don't split)
+                if first_plant["h"] > target_row["row_h"]:
+                    continue
 
-                        score = assoc_scores.get((placed_p["veg_id"], plant["veg_id"]), 0)
-                        if score < 0:
-                            valid_horizontal = False
+                # 2. Check associations for ALL plants in the block
+                all_compatible = True
+                temp_used_width = used_width
+
+                for plant in source_plants:
+                    # Horizontal: Check neighbors (only relevant for the first plant in the block)
+                    if plant == source_plants[0]:
+                        valid_horizontal = True
+                        for placed_p in reversed(target_row["plants"]):
+                            dist = temp_used_width - (placed_p["x_offset"] + placed_p["w"])
+                            if dist > 1:
+                                break
+                            score = assoc_scores.get((placed_p["veg_id"], plant["veg_id"]), 0)
+                            if score < 0:
+                                valid_horizontal = False
+                                break
+                        if not valid_horizontal:
+                            all_compatible = False
                             break
-
-                    if not valid_horizontal:
-                        continue
 
                     # Vertical: Neighbor below
                     vertical_conflict = False
@@ -233,23 +241,19 @@ def _fill_gaps(
                         neighbor_row = rows[r_idx]
                         if not neighbor_row["plants"]:
                             continue
-
-                        # Check all plants in that row for overlap and conflict
                         for neighbor_p in neighbor_row["plants"]:
                             p_x, p_w = neighbor_p["x_offset"], neighbor_p["w"]
-                            cand_x, cand_w = used_width, plant["w"]
-
+                            cand_x, cand_w = temp_used_width, plant["w"]
                             gap_x = max(0, max(p_x, cand_x) - min(p_x + p_w, cand_x + cand_w))
                             if gap_x <= 1:
                                 score = assoc_scores.get((plant["veg_id"], neighbor_p["veg_id"]), 0)
                                 if score < 0:
                                     vertical_conflict = True
                                     break
-                        # Only check the immediate next non-empty row
                         break
-
                     if vertical_conflict:
-                        continue
+                        all_compatible = False
+                        break
 
                     # Vertical: Neighbor above
                     vertical_conflict = False
@@ -257,35 +261,34 @@ def _fill_gaps(
                         neighbor_row = rows[r_idx]
                         if not neighbor_row["plants"]:
                             continue
-
-                        # Check all plants in that row for overlap and conflict
                         for neighbor_p in neighbor_row["plants"]:
                             p_x, p_w = neighbor_p["x_offset"], neighbor_p["w"]
-                            cand_x, cand_w = used_width, plant["w"]
-
+                            cand_x, cand_w = temp_used_width, plant["w"]
                             gap_x = max(0, max(p_x, cand_x) - min(p_x + p_w, cand_x + cand_w))
                             if gap_x <= 1:
                                 score = assoc_scores.get((plant["veg_id"], neighbor_p["veg_id"]), 0)
                                 if score < 0:
                                     vertical_conflict = True
                                     break
-                        # Only check the immediate prev non-empty row
+                        break
+                    if vertical_conflict:
+                        all_compatible = False
                         break
 
-                    if vertical_conflict:
-                        continue
+                    temp_used_width += plant["w"]
 
-                    # Found a candidate! Move it.
-                    moved_plant = source_row["plants"].pop(k)
+                if all_compatible:
+                    # Move ALL plants
+                    for plant in source_plants:
+                        plant["x_offset"] = used_width
+                        used_width += plant["w"]
+                        target_row["plants"].append(plant)
 
-                    # Update its position
-                    moved_plant["x_offset"] = used_width
-
-                    # Add to target
-                    target_row["plants"].append(moved_plant)
-
+                    source_row["plants"] = []  # Clear source row
                     candidate_found = True
-                    break  # Break inner loop (plants)
+                    # Break outer loop (source rows) to recalculate gap,
+                    # although practically this source row is empty now.
+                    break
 
                 if candidate_found:
                     break  # Break outer loop (source rows) to recalculate gap
