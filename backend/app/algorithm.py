@@ -90,6 +90,7 @@ def generate_plan(req: GenerateRequest, db: Session) -> GenerateResponse:
 
     # Fill gaps in rows with vegetables from other rows ONLY if the layout overflows the garden height.
     # This prevents "agglutination" when there is plenty of space.
+    # We now also allow filling from ANY row to optimize space (bidirectional compaction).
     if total_height > H:
         _fill_gaps(rows, W, assoc_scores)
 
@@ -196,7 +197,8 @@ def _fill_gaps(
     assoc_scores: dict[tuple[int, int], int],
 ) -> None:
     """Try to fill gaps at the end of rows with vegetables from other rows,
-    prioritizing non-negative associations and fitting dimensions."""
+    prioritizing non-negative associations and fitting dimensions.
+    Iterates through all possible source rows to maximize compaction."""
     # Iterate through rows top to bottom
     for i in range(len(rows)):
         target_row = rows[i]
@@ -216,17 +218,30 @@ def _fill_gaps(
             if gap <= 0:
                 break
 
-            candidate_found = False
-
-            # Search for candidates from bottom rows upwards
-            # Start from the last row, go up to i+1
-            for j in range(len(rows) - 1, i, -1):
-                source_row = rows[j]
-                if not source_row["plants"]:
+            # Identify potential source rows
+            potential_sources = []
+            for j in range(len(rows)):
+                if i == j:
+                    continue
+                if not rows[j]["plants"]:
                     continue
 
-                # Check each plant in the source row
-                # We iterate backwards to take from the end
+                # Check if the row has a representative plant that fits
+                candidate_plant = rows[j]["plants"][-1]
+                if candidate_plant["w"] <= gap and candidate_plant["h"] <= target_row["row_h"]:
+                    potential_sources.append(j)
+
+            # Sort sources:
+            # 1. Height Ascending (Prioritize emptying small rows to save vertical space)
+            # 2. Index Descending (Prioritize bottom rows to avoid rejection)
+            potential_sources.sort(key=lambda idx: (rows[idx]["row_h"], -idx))
+
+            candidate_found = False
+
+            for j in potential_sources:
+                source_row = rows[j]
+
+                # We try to take the last plant
                 for k in range(len(source_row["plants"]) - 1, -1, -1):
                     plant = source_row["plants"][k]
 
@@ -234,6 +249,12 @@ def _fill_gaps(
                     if plant["w"] > gap:
                         continue
                     if plant["h"] > target_row["row_h"]:
+                        continue
+
+                    # Avoid moving a plant back to its "home" row type from a "host" row,
+                    # as this usually increases vertical space usage (un-hiding the plant).
+                    # We allow merging two rows of same type (Home -> Home).
+                    if plant["veg_id"] == target_row["veg_id"] and plant["veg_id"] != source_row["veg_id"]:
                         continue
 
                     # 2. Check associations
