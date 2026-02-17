@@ -227,29 +227,53 @@ def _fill_gaps(
                     if not valid_horizontal:
                         continue
 
-                    # Vertical: Neighbor below (next row primary veg)
-                    next_row_id = None
+                    # Vertical: Neighbor below
+                    vertical_conflict = False
                     for r_idx in range(i + 1, len(rows)):
-                        if rows[r_idx]["plants"]:
-                            next_row_id = rows[r_idx]["veg_id"]
-                            break
-
-                    if next_row_id is not None:
-                        score = assoc_scores.get((plant["veg_id"], next_row_id), 0)
-                        if score < 0:
+                        neighbor_row = rows[r_idx]
+                        if not neighbor_row["plants"]:
                             continue
 
-                    # Vertical: Neighbor above (prev row primary veg)
-                    prev_row_id = None
+                        # Check all plants in that row for overlap and conflict
+                        for neighbor_p in neighbor_row["plants"]:
+                            p_x, p_w = neighbor_p["x_offset"], neighbor_p["w"]
+                            cand_x, cand_w = used_width, plant["w"]
+
+                            gap_x = max(0, max(p_x, cand_x) - min(p_x + p_w, cand_x + cand_w))
+                            if gap_x <= 1:
+                                score = assoc_scores.get((plant["veg_id"], neighbor_p["veg_id"]), 0)
+                                if score < 0:
+                                    vertical_conflict = True
+                                    break
+                        # Only check the immediate next non-empty row
+                        break
+
+                    if vertical_conflict:
+                        continue
+
+                    # Vertical: Neighbor above
+                    vertical_conflict = False
                     for r_idx in range(i - 1, -1, -1):
-                        if rows[r_idx]["plants"]:
-                            prev_row_id = rows[r_idx]["veg_id"]
-                            break
-
-                    if prev_row_id is not None:
-                        score = assoc_scores.get((prev_row_id, plant["veg_id"]), 0)
-                        if score < 0:
+                        neighbor_row = rows[r_idx]
+                        if not neighbor_row["plants"]:
                             continue
+
+                        # Check all plants in that row for overlap and conflict
+                        for neighbor_p in neighbor_row["plants"]:
+                            p_x, p_w = neighbor_p["x_offset"], neighbor_p["w"]
+                            cand_x, cand_w = used_width, plant["w"]
+
+                            gap_x = max(0, max(p_x, cand_x) - min(p_x + p_w, cand_x + cand_w))
+                            if gap_x <= 1:
+                                score = assoc_scores.get((plant["veg_id"], neighbor_p["veg_id"]), 0)
+                                if score < 0:
+                                    vertical_conflict = True
+                                    break
+                        # Only check the immediate prev non-empty row
+                        break
+
+                    if vertical_conflict:
+                        continue
 
                     # Found a candidate! Move it.
                     moved_plant = source_row["plants"].pop(k)
