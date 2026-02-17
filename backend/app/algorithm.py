@@ -88,11 +88,16 @@ def generate_plan(req: GenerateRequest, db: Session) -> GenerateResponse:
     # Calculate total height of the layout
     total_height = sum(r["row_h"] for r in rows)
 
-    # Fill gaps in rows with vegetables from other rows ONLY if the layout overflows the garden height.
-    # This prevents "agglutination" when there is plenty of space.
-    # We now also allow filling from ANY row to optimize space (bidirectional compaction).
     if total_height > H:
-        _fill_gaps(rows, W, assoc_scores)
+        # Step 1: Consolidate same-vegetable rows (merge partial rows together)
+        # This keeps vegetables grouped while reclaiming space.
+        _consolidate_same_vegetable_rows(rows, W)
+        rows = [r for r in rows if r["plants"]]
+        total_height = sum(r["row_h"] for r in rows)
+
+        # Step 2: Only disperse into other vegetable rows if still overflowing
+        if total_height > H:
+            _fill_gaps(rows, W, assoc_scores)
 
     # Remove empty rows (in case all items were moved)
     rows = [r for r in rows if r["plants"]]
@@ -189,6 +194,50 @@ def _are_adjacent(a: PlacedVegetable, b: PlacedVegetable) -> bool:
     gap_x = max(0, max(a.x, b.x) - min(a.x + a.w, b.x + b.w))
     gap_y = max(0, max(a.y, b.y) - min(a.y + a.h, b.y + b.h))
     return gap_x <= 1 and gap_y <= 1
+
+
+def _consolidate_same_vegetable_rows(rows: list[dict], W: int) -> None:
+    """Merge partial rows of the same vegetable into fewer rows.
+    E.g. if radishes have 2 rows (one with 5, one with 3) and 8 fit per row,
+    merge them into a single row of 8 — freeing an entire row of vertical space."""
+    # Group row indices by veg_id
+    veg_groups: dict[int, list[int]] = {}
+    for idx, row in enumerate(rows):
+        if row["plants"]:
+            veg_groups.setdefault(row["veg_id"], []).append(idx)
+
+    for veg_id, indices in veg_groups.items():
+        if len(indices) <= 1:
+            continue
+
+        # Collect all plants from these rows
+        all_plants = []
+        row_h = rows[indices[0]]["row_h"]
+        for idx in indices:
+            all_plants.extend(rows[idx]["plants"])
+            rows[idx]["plants"] = []
+
+        # How many fit per row?
+        if not all_plants:
+            continue
+        pw = all_plants[0]["w"]
+        per_row = W // pw if pw > 0 else 0
+        if per_row == 0:
+            continue
+
+        # Redistribute plants into as few rows as possible
+        target_idx = 0
+        for i, plant in enumerate(all_plants):
+            if target_idx < len(indices):
+                row_index = indices[target_idx]
+            else:
+                break
+            plant["x_offset"] = (i % per_row) * pw
+            rows[row_index]["plants"].append(plant)
+            rows[row_index]["row_h"] = row_h
+            rows[row_index]["veg_id"] = veg_id
+            if (i + 1) % per_row == 0:
+                target_idx += 1
 
 
 def _fill_gaps(
