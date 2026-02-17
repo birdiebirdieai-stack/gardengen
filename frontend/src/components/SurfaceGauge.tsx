@@ -24,7 +24,7 @@ export default function SurfaceGauge({ usedCells, totalCells }: Props) {
         />
       </div>
       <p className="text-xs text-gray-500 mt-1">
-        {(usedCells * 25).toLocaleString()} cm² / {(totalCells * 25).toLocaleString()} cm²
+        {((usedCells * 25) / 10000).toLocaleString(undefined, { maximumFractionDigits: 2 })} m² / {((totalCells * 25) / 10000).toLocaleString(undefined, { maximumFractionDigits: 2 })} m²
       </p>
     </div>
   );
