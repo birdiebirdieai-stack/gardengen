@@ -61,12 +61,37 @@ def generate_plan(req: GenerateRequest, db: Session) -> GenerateResponse:
             })
             remaining -= n
 
-    # Optimize row order using greedy nearest-neighbor on association scores
+    # Optimize row order using greedy nearest-neighbor on association scores.
+    # We group rows by vegetable ID first to keep same vegetables together.
     if len(rows) > 1:
-        rows = _optimize_row_order(rows, assoc_scores)
+        # Group rows by vegetable type
+        groups = {}
+        for r in rows:
+            groups.setdefault(r["veg_id"], []).append(r)
 
-    # Fill gaps in rows with vegetables from other rows
-    _fill_gaps(rows, W, assoc_scores)
+        # Create representative rows for optimization (use the first row of each group)
+        # We wrap them to preserve the group reference
+        meta_rows = []
+        for vid, grouped_rows in groups.items():
+            rep = grouped_rows[0].copy()
+            rep["_original_group"] = grouped_rows
+            meta_rows.append(rep)
+
+        # Optimize order of groups
+        optimized_meta = _optimize_row_order(meta_rows, assoc_scores)
+
+        # Flatten back to rows
+        rows = []
+        for meta in optimized_meta:
+            rows.extend(meta["_original_group"])
+
+    # Calculate total height of the layout
+    total_height = sum(r["row_h"] for r in rows)
+
+    # Fill gaps in rows with vegetables from other rows ONLY if the layout overflows the garden height.
+    # This prevents "agglutination" when there is plenty of space.
+    if total_height > H:
+        _fill_gaps(rows, W, assoc_scores)
 
     # Remove empty rows (in case all items were moved)
     rows = [r for r in rows if r["plants"]]

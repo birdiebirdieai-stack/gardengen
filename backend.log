@@ -1,0 +1,7 @@
+INFO:     Started server process [3821]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+Seeded 30 vegetables and 70 associations (bidirectional).
+INFO:     127.0.0.1:50900 - "GET /api/vegetables HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50908 - "GET /api/vegetables HTTP/1.1" 200 OK
