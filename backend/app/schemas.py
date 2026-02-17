@@ -53,7 +53,7 @@ class AssociationWithNames(AssociationOut):
 # ---------- Generate ----------
 class GenerateItem(BaseModel):
     vegetable_id: int
-    quantity: int = Field(..., ge=1, le=100)
+    quantity: int = Field(..., ge=1, le=1000)
 
 
 class GenerateRequest(BaseModel):

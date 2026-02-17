@@ -13,6 +13,8 @@ export default function SelectionPage() {
   const setVegetables = useGardenStore((state) => state.setVegetables);
   const selectedItems = useGardenStore((state) => state.selectedItems);
   const setQuantity = useGardenStore((state) => state.setQuantity);
+  const fullRowItems = useGardenStore((state) => state.fullRowItems);
+  const setFullRow = useGardenStore((state) => state.setFullRow);
   const setResult = useGardenStore((state) => state.setResult);
   const setLoading = useGardenStore((state) => state.setLoading);
   const setError = useGardenStore((state) => state.setError);
@@ -22,11 +24,27 @@ export default function SelectionPage() {
     api.getVegetables().then(setVegetables);
   }, [setVegetables]);
 
-  const totalCells = (width / 5) * (height / 5);
+  const gridW = width / 5;
+  const totalCells = gridW * (height / 5);
+
+  const getActualQuantity = (vegId: number, qty: number) => {
+    if (!fullRowItems.has(vegId)) return qty;
+    const v = vegetables.find((v) => v.id === vegId);
+    if (!v) return qty;
+    const perRow = Math.floor(gridW / v.grid_width);
+    return qty * perRow; // qty = number of rows
+  };
+
+  const getPerRow = (vegId: number) => {
+    const v = vegetables.find((v) => v.id === vegId);
+    if (!v) return 1;
+    return Math.floor(gridW / v.grid_width);
+  };
+
   let usedCells = 0;
   selectedItems.forEach((qty, vegId) => {
     const v = vegetables.find((v) => v.id === vegId);
-    if (v) usedCells += v.grid_width * v.grid_height * qty;
+    if (v) usedCells += v.grid_width * v.grid_height * getActualQuantity(vegId, qty);
   });
 
   const hasSelection = selectedItems.size > 0;
@@ -37,7 +55,7 @@ export default function SelectionPage() {
     try {
       const items = Array.from(selectedItems.entries()).map(([vegetable_id, quantity]) => ({
         vegetable_id,
-        quantity,
+        quantity: getActualQuantity(vegetable_id, quantity),
       }));
       const result = await api.generate({ width_cm: width, height_cm: height, items });
       setResult(result);
@@ -75,6 +93,9 @@ export default function SelectionPage() {
             vegetable={v}
             quantity={selectedItems.get(v.id) ?? 0}
             onQuantityChange={(qty) => setQuantity(v.id, qty)}
+            fullRow={fullRowItems.has(v.id)}
+            onFullRowChange={(enabled) => setFullRow(v.id, enabled)}
+            perRow={getPerRow(v.id)}
           />
         ))}
       </div>

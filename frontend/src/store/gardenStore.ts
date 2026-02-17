@@ -8,6 +8,8 @@ interface GardenState {
 
   selectedItems: Map<number, number>; // vegetable_id -> quantity
   setQuantity: (vegId: number, qty: number) => void;
+  fullRowItems: Set<number>; // vegetable_ids using "full row" mode
+  setFullRow: (vegId: number, enabled: boolean) => void;
   clearSelection: () => void;
 
   vegetables: Vegetable[];
@@ -32,11 +34,24 @@ export const useGardenStore = create<GardenState>((set) => ({
   setQuantity: (vegId, qty) =>
     set((state) => {
       const next = new Map(state.selectedItems);
-      if (qty <= 0) next.delete(vegId);
+      if (qty <= 0) {
+        next.delete(vegId);
+        const nextFullRow = new Set(state.fullRowItems);
+        nextFullRow.delete(vegId);
+        return { selectedItems: next, fullRowItems: nextFullRow };
+      }
       else next.set(vegId, qty);
       return { selectedItems: next };
     }),
-  clearSelection: () => set({ selectedItems: new Map() }),
+  fullRowItems: new Set(),
+  setFullRow: (vegId, enabled) =>
+    set((state) => {
+      const next = new Set(state.fullRowItems);
+      if (enabled) next.add(vegId);
+      else next.delete(vegId);
+      return { fullRowItems: next };
+    }),
+  clearSelection: () => set({ selectedItems: new Map(), fullRowItems: new Set() }),
 
   vegetables: [],
   setVegetables: (vegetables) => set({ vegetables }),
